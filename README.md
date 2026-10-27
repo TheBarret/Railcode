@@ -1,4 +1,4 @@
-# Railcode (Prototype, rev 0.3)
+# Railcode (Prototype, rev 0.3-experimental)
 
 A spatial, 2D grid-based stack machine designed for my [Symbiote kernel project](https://github.com/TheBarret/Symbiote-active).  
 
@@ -22,8 +22,26 @@ rather than a raw program counter increment (`PC++`).
 * **Static Symbol Resolution:**  
   Variable names are resolved to fixed-index slots at load time, eliminating runtime dictionary overhead.
 
+The grid interpreter tracks an instruction pointer using (`X, Y`) coordinates. Normal execution advances vertically down the grid (`Y++`).  
 
-ALU Example:  
+- `█` identifies the program entry and declares the operand-stack capacity.
+- `│` is a passive flow rail. It advances execution without performing an operation.
+- `├` is an active instruction conduit. Its payload may contain an instruction or a label definition.
+- `↳` performs an unconditional jump to a label.
+- `╞` performs a conditional jump, consuming the top stack value and jumping when that value is zero.
+- `░` terminates execution.
+
+## Static symbol resolution
+
+Variable declarations are resolved to fixed-index slots during compilation.  
+Labels are resolved to bytecode addresses, and jump operands are patched before execution.  
+
+## Stack model
+
+Railcode uses a bounded operand stack with a capacity declared at the entry marker.  
+Stack operations use a fixed allocation rather than allocating memory for individual pushes.  
+
+## Example: ALU operations
 ```py
     decl x, int, 10;
     decl y, int, 20;
@@ -40,10 +58,9 @@ ALU Example:
     │
     ░             \\ Halt program
 ```
+> Result: `{'x': 10, 'y': 20, 'result': 250}`  
 
-> Would result in: `{'x': 10, 'y': 20, 'result': 250}`  
-
-Example of a count-down:  
+## Example: count-down:  
 ```py
     decl i, int, 5;
     decl out, int, 0;
@@ -64,6 +81,21 @@ Example of a count-down:
     ░
 ```
 
+## Example: While-loops
+
+```py
+    decl task, int, 1;
+    
+    █ 0x10
+    ├ :loop    while (true) {
+    ├ < task      // do some computation...
+    ├ > task      
+    ↳ :loop    }
+    ░
+```
+> Stack overflow, stack underflow, invalid instructions, and execution-budget exhaustion are runtime errors. 
+> The prototype also defines signed 32-bit arithmetic behavior, including wrapping for arithmetic results and division truncation toward zero.
+
 ---
 
 ## 2. Syntax & Glyph Taxonomy
@@ -76,28 +108,30 @@ decl <identifier>, <type>, <initial_value>;
 ```
 > Allocates a fixed-size slot in the VM's variable array. Supported types are restricted to `int` (32-bit signed integer).
 
-### 3. Railcode
+## 3. Instruction Set
 
-```
-    Glyph            Bytecode
+The following table describes the currently defined bytecode encoding.  
 
-    < var            GET  slot          0x01 <slot:1>
-    < imm            LIT  imm32         0x02 <imm:4, signed LE>
-    ╞ (bare)         POP                0x03
-    . +              ADD                0x10
-    . -              SUB                0x11
-    . *              MUL                0x12
-    . /              DIV                0x13 (C99 trunc, /0 faults)
-    . ==             EQ                 0x14
-    . !=             NEQ                0x15 (push 1/0)
-    . <              LT                 0x16
-    . <=             LE                 0x17
-    . >              GT                 0x18
-    . >=             GE                 0x19
-    > var            SET  slot          0x20 <slot:1>
-    ↳ :label         JMP  addr          0x30 <addr:4, LE>
-    ╞ :label         JZ   addr          0x31 <addr:4, LE>  (pop; jump if 0)
-    ░                HLT                0xFF
-```
+Glyph : source form	/ Opcode / Operand / Behavior:  
+- `< var`    : `GET` / 0x01	/ 1-byte / slot	Push the variable's value
+- `< imm`    : `LIT` / 0x02	/ 4-byte / signed LE	Push a signed 32-bit immediate
+- `╞`        : `POP` / 0x03	/ None	/ Pop and discard the top value; grammar status is unresolved (bare symbol)
+- `. +`      : `ADD` / 0x10	/ None	/ Add the top two values
+- `. -`	     : `SUB` / 0x11	/ None	/ Subtract the top value from the preceding value
+- `. *`	     : `MUL` / 0x12	/ None	/ Multiply the top two values
+- `. /`	     : `DIV` / 0x13	/ None	/ Divide the preceding value by the top value
+- `. ==`     : `EQ` / 0x14	/ None	/ Push 1 if equal, otherwise 0
+- `. !=`     : `NE` / 0x15	/ None	/ Push 1 if unequal, otherwise 0
+- `. <`	     : `LT` / 0x16	/ None	/ Push 1 if less than, otherwise 0
+- `. <=`     : `LE` / 0x17	/ None	/ Push 1 if less than or equal, otherwise 0
+- `. >`	     : `GT` / 0x18	/ None	/ Push 1 if greater than, otherwise 0
+- `. >=`     : `GE` / 0x19	/ None	/ Push 1 if greater than or equal, otherwise 0
+- `> var`    : `SET` / 0x20	/ 1-byte / slot	Pop a value into the variable
+- `↳ :label` : `JMP` / 0x30	/ 4-byte / LE address	Jump unconditionally
+- `╞ :label` : `JZ` / 0x31	/ 4-byte / LE address	Pop a value; jump if zero
+- `░`	       : `HLT` / 0xFF	/ None	/ Halt execution
 
+> LE in the operand column means little-endian encoding. Immediate values and jump addresses occupy four bytes.
 > more coming soon...
+
+---
