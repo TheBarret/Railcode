@@ -23,7 +23,7 @@ rather than a raw program counter increment (`PC++`).
   Variable names are resolved to fixed-index slots at load time, eliminating runtime dictionary overhead.
 
 
-Example:  
+ALU Example:  
 ```py
     decl x, int, 10;
     decl y, int, 20;
@@ -42,6 +42,27 @@ Example:
 ```
 
 > Would result in: `{'x': 10, 'y': 20, 'result': 250}`  
+
+Example of a count-down:  
+```py
+    decl i, int, 5;
+    decl out, int, 0;
+    
+    █ 0x20
+    │
+    ├ :loop        \\ loop top
+    ├ < i, 0
+    ├ . >          \\ cond: i > 0
+    ╞ :done        \\ if cond == 0 -> exit
+    ├ < i
+    ├ > out        \\ out = i
+    ├ < i, 1
+    ├ . -
+    ├ > i          \\ i -= 1
+    ↳ :loop        \\ backwards jump = iteration
+    ├ :done
+    ░
+```
 
 ---
 
