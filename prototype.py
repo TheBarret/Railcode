@@ -1,30 +1,24 @@
 """
-Railcode VM prototype v0.2: spatial 2D grid stack machine.
-Target: Symbiote kernel (C, freestanding). This Python prototype mirrors the
-planned C implementation shapes: fixed kmalloc'd slot buffer, explicit sp,
-no dictionary lookups at runtime, no regex at runtime.
+Railcode VM prototype v0.3, spatial 2D grid stack machine.
 
-Every runtime path here maps 1:1 onto the flat bytecode of the spec's
-Section 4:
-    GET -> < var       LIT -> < imm      ADD/SUB/MUL/DIV -> . op
-    SET -> > var       JZ  -> ╞ :label   JMP -> ↳ :label   HLT -> ░
+Runtime paths:
 
-Changes vs v0.1:
-  * Division truncates toward zero (C99), not Python floor.
-  * All values wrap to int32 at push and in every ALU op (free in C,
-    emulated here).
-  * ╞ conditional limb implemented:
-      - bare ╞: pops; if zero, travels the horizontal `─` limb to `╛`,
-        which returns the IP to the spine column on the next row.
-        NOTE: per-spec geometry this converges with the fall-through path,
-        so a bare limb currently skips nothing — kept for glyph fidelity.
-      - `╞ :label`: pops; if zero, jumps to the label's coordinates.
-        This is the useful form (compiles to JZ).
-  * ↳ :label — unconditional jump conduit (compiles to JMP).
-  * Missing ░ terminator now raises a fatal VMFault (per spec).
-  * Comparison ALU ops (== != < <= > >=) push 1/0 so ╞ has something to eat.
-  * Multiple █ entry markers fault instead of silently last-wins.
-  * `\` comment stripping kept, but done once at load time only.
+    Glyph             Bytecode
+
+    < var            GET  slot          0x01 <slot:1>
+    < imm            LIT  imm32         0x02 <imm:4, signed LE>
+    (bare ╞)         POP                0x03
+    . +              ADD                0x10
+    . -              SUB                0x11
+    . *              MUL                0x12
+    . /              DIV                0x13   (C99 trunc, /0 faults)
+    . == . !=        EQ 0x14, NE 0x15   (push 1/0)
+    . < . <=         LT 0x16, LE 0x17
+    . > . >=         GT 0x18, GE 0x19
+    > var            SET  slot          0x20 <slot:1>
+    ↳ :label         JMP  addr          0x30 <addr:4, LE>
+    ╞ :label         JZ   addr          0x31 <addr:4, LE>  (pop; jump if 0)
+    ░                HLT                0xFF
 """
 
 import re
@@ -32,6 +26,19 @@ import re
 INT32_MIN = -2**31
 INT32_MAX = 2**31 - 1
 COMMENT = '\\'
+DEFAULT_MAX_STEPS = 1_000_000
+
+#  bytecode opcodes (Section 4)
+OP_GET, OP_LIT, OP_POP = 0x01, 0x02, 0x03
+OP_ADD, OP_SUB, OP_MUL, OP_DIV = 0x10, 0x11, 0x12, 0x13
+OP_EQ, OP_NE, OP_LT, OP_LE, OP_GT, OP_GE = 0x14, 0x15, 0x16, 0x17, 0x18, 0x19
+OP_SET = 0x20
+OP_JMP, OP_JZ = 0x30, 0x31
+OP_HLT = 0xFF
+
+ALU_OPCODES = {'+': OP_ADD, '-': OP_SUB, '*': OP_MUL, '/': OP_DIV,
+               '==': OP_EQ, '!=': OP_NE, '<': OP_LT, '<=': OP_LE,
+               '>': OP_GT, '>=': OP_GE}
 
 
 def wrap32(v):
@@ -46,7 +53,7 @@ def trunc_div(a, b):
 
 
 class VMFault(Exception):
-    """Fatal VM error (illegal symbol, missing terminator, bad limb...)."""
+    """Fatal VM error (illegal symbol/opcode, missing terminator, step limit)."""
 
 
 class StackOverflow(Exception):
@@ -58,8 +65,10 @@ class StackUnderflow(Exception):
 
 
 class RailInterpreter:
+    """Grid-walking interpreter + loader/compiler (the testbench side)."""
+
     def __init__(self, source_code):
-        self.variables = {}
+        self.variables = {}         # name -> initial value (slot order = decl order)
         # Mirror of a kmalloc'd slot buffer + stack pointer.
         # (In the kernel version: `slots = kmalloc(cap * sizeof(slot))`,
         #  `sp = 0`, and `kfree(slots)` on halt.)
@@ -67,7 +76,7 @@ class RailInterpreter:
         self.stack_slots = None
         self.sp = 0
         self.grid = []
-        self.labels = {}          # ':name' -> (x, y); load-time only
+        self.labels = {}           # ':name' -> (x, y); load-time only
         self.ip = (0, 0)
         self.entry = None
         self._parse_source(source_code)
@@ -75,7 +84,8 @@ class RailInterpreter:
     #  stack primitives over the fixed allocation
     def _stack_push(self, value):
         if self.sp >= self.stack_capacity:
-            raise StackOverflow(f"Stack overflow: capacity {self.stack_capacity}, sp {self.sp}")
+            raise StackOverflow(
+                f"Stack overflow: capacity {self.stack_capacity}, sp {self.sp}")
         self.stack_slots[self.sp] = wrap32(value)
         self.sp += 1
 
@@ -100,6 +110,11 @@ class RailInterpreter:
                 name, vtype, val = m.groups()
                 if vtype != "int":
                     raise SyntaxError(f"Unsupported type '{vtype}' (int only).")
+                if name in self.variables:
+                    raise SyntaxError(f"Duplicate declaration '{name}'")
+                if len(self.variables) >= 256:
+                    raise SyntaxError(
+                        "Too many declarations (max=256)")
                 self.variables[name] = wrap32(int(val, 0))
                 continue
             if clean.strip():
@@ -108,40 +123,57 @@ class RailInterpreter:
         max_width = max(len(l) for l in grid_lines) if grid_lines else 0
         self.grid = [list(l.ljust(max_width)) for l in grid_lines]
 
+        # Pass 1: entry markers + label definitions.
         for y, row in enumerate(self.grid):
             row_text = "".join(row)
 
-            # Entry marker detection: unconditional, every row.
             for x, ch in enumerate(row):
                 if ch == '█':
                     if self.entry is not None:
-                        raise SyntaxError(f"Multiple entry markers: ({self.entry}) and ({x},{y}).")
+                        raise SyntaxError(
+                            f"Multiple entry markers: ({self.entry}) "
+                            f"and ({x},{y}).")
                     self.ip = (x, y)
                     self.entry = (x, y)
                     payload = "".join(row[x + 1:]).split(COMMENT)[0].strip()
                     try:
                         size = int(payload, 0)
                     except ValueError:
-                        raise SyntaxError(f"Invalid stack size '{payload}' at entry marker.")
+                        raise SyntaxError(
+                            f"Invalid stack size '{payload}' at entry marker.")
                     if size <= 0:
                         raise SyntaxError("Stack size must be positive.")
                     self.stack_capacity = size
-                    self.stack_slots = [None] * size
+                    self.stack_slots = [None] * size   # kmalloc(size * slot)
                     self.sp = 0
 
-            # Label definitions: only ├ rows define labels.
+            # Only ├ rows DEFINE labels; ╞/↳ rows merely REFERENCE them.
+            # Registering a ╞/↳ row would make jumps land on the ╞/↳
+            # glyph itself (popping again / re-jumping).
             gx = next((i for i, ch in enumerate(row_text)
                        if ch in ('├', '╞', '↳')), None)
             if gx is None or row_text[gx] != '├':
                 continue
             for label in re.findall(r":\w+", row_text):
-                self.labels.setdefault(label, (gx, y))
+                if label in self.labels:
+                    raise SyntaxError(f"Duplicate label definition '{label}'.")
+                self.labels[label] = (gx, y)
+
+        # Pass 2: validate jump references, bad programs die in the
+        # loader, never in the VM.
+        for y, row in enumerate(self.grid):
+            row_text = "".join(row)
+            for m in re.finditer(r"[╞↳]\s*(:\w+)", row_text):
+                if m.group(1) not in self.labels:
+                    raise SyntaxError(
+                        f"Undefined label reference '{m.group(1)}' "
+                        f"at row {y}.")
 
     def _payload(self, x, y):
         return "".join(self.grid[y][x + 1:]).split(COMMENT)[0].strip()
 
-    #  run time (walks glyphs; C port walks flat bytecode instead)
-    def run(self):
+    #  run time (walks glyphs; the C kernel walks flat bytecode)
+    def run(self, max_steps=DEFAULT_MAX_STEPS):
         if self.entry is None:
             raise SyntaxError("No entry marker (█) found in program.")
         if self.stack_slots is None:
@@ -152,11 +184,19 @@ class RailInterpreter:
         height = len(self.grid)
         width = len(self.grid[0]) if height else 0
         halted = False
+        steps = 0
 
         print(f"Starting execution at IP ({x},{y}) "
               f"with stack capacity {self.stack_capacity} ---")
         try:
             while 0 <= y < height and 0 <= x < width:
+                self.ip = (x, y)
+                steps += 1
+                if steps > max_steps:
+                    raise VMFault(
+                        f"Step limit exceeded ({max_steps}), "
+                        f"runaway program?")
+
                 sym = self.grid[y][x]
 
                 if sym == '░':
@@ -171,33 +211,17 @@ class RailInterpreter:
                         self._execute_instruction(payload)
                     # ':label' payload on ├ is a label definition: no-op.
                 elif sym == '╞':
-                    cond = self._stack_pop()
                     payload = self._payload(x, y)
-                    if payload.startswith(':'):
-                        # JZ: branch to label when popped value is zero.
-                        if cond == 0:
-                            tgt = self.labels.get(payload)
-                            if tgt is None:
-                                raise VMFault(f"Unknown label '{payload}'.")
-                            x, y = tgt
-                            continue
-                    elif cond == 0:
-                        # Bare limb: travel right over `─` to the `╛` cap,
-                        # then return to the spine on the next row.
-                        lx = x + 1
-                        while lx < width and self.grid[y][lx] == '─':
-                            lx += 1
-                        if lx >= width or self.grid[y][lx] != '╛':
-                            raise VMFault(
-                                f"Limb at ({x},{y}) has no ╛ cap.")
-                        x = spine_x
+                    if not payload.startswith(':'):
+                        raise SyntaxError(
+                            f"Bare ╞ at ({x},{y}) has no :label operand "
+                            f"(bare conditional limbs are unsupported)")
+                    if self._stack_pop() == 0:
+                        x, y = self.labels[payload]
+                        continue
                 elif sym == '↳':
-                    # JMP: unconditional label jump.
-                    payload = self._payload(x, y)
-                    tgt = self.labels.get(payload)
-                    if tgt is None:
-                        raise VMFault(f"Unknown label '{payload}'.")
-                    x, y = tgt
+                    # JMP: unconditional label jump (backwards = loop).
+                    x, y = self.labels[self._payload(x, y)]
                     continue
                 else:
                     raise VMFault(
@@ -214,6 +238,112 @@ class RailInterpreter:
             self.stack_slots = None   # kfree(slots)
             self.sp = 0
             print(f"Execution finished. Final variables: {self.variables} ---")
+
+    #  compile: grid -> flat bytecode (the loader's real job)
+    def compile(self):
+        """One static walk down the spine emits the opcode stream.
+        Jump operands are patched in a second pass. Labels emit nothing;
+        a label's address is the offset of the next emitted op."""
+        if self.entry is None:
+            raise SyntaxError("No entry marker (█) found in program.")
+
+        x, y = self.entry
+        height = len(self.grid)
+        width = len(self.grid[0]) if height else 0
+        code = bytearray()
+        slot_index = {name: i for i, name in enumerate(self.variables)}
+        code_labels = {}          # ':name' -> bytecode offset
+        patches = []              # (operand_offset, label)
+
+        def emit(*ops):
+            code.extend(ops)
+
+        def emit_imm(v):
+            code.extend(wrap32(v).to_bytes(4, 'little', signed=True))
+
+        halted = False
+        while 0 <= y < height and 0 <= x < width:
+            sym = self.grid[y][x]
+
+            if sym == '░':
+                emit(OP_HLT)
+                halted = True
+                break
+            elif sym in ('│', '█'):
+                pass
+            elif sym == '├':
+                payload = self._payload(x, y)
+                if payload.startswith(':'):
+                    if payload in code_labels:
+                        raise SyntaxError(
+                            f"Duplicate label '{payload}' during compile.")
+                    code_labels[payload] = len(code)
+                else:
+                    self._compile_instruction(
+                        payload, emit, emit_imm, slot_index)
+            elif sym == '╞':
+                payload = self._payload(x, y)
+                if not payload.startswith(':'):
+                    raise SyntaxError(
+                        f"Bare ╞ at ({x},{y}) has no :label operand "
+                        f"(bare conditional limbs are unsupported)")
+                emit(OP_JZ)
+                patches.append((len(code), payload))
+                code.extend(b'\x00\x00\x00\x00')
+            elif sym == '↳':
+                emit(OP_JMP)
+                patches.append((len(code), self._payload(x, y)))
+                code.extend(b'\x00\x00\x00\x00')
+            else:
+                raise SyntaxError(
+                    f"Illegal symbol '{sym}' at ({x},{y}) during compile.")
+            y += 1
+
+        if not halted:
+            raise SyntaxError("Compile walk left grid without a ░ terminator.")
+
+        for pos, label in patches:
+            if label not in code_labels:
+                raise SyntaxError(f"Undefined label '{label}' during compile.")
+            tgt = code_labels[label]
+            if not (0 <= tgt < len(code)):
+                raise SyntaxError(
+                    f"Label '{label}' resolved to {tgt}, outside code (0..{len(code)-1})")
+            code[pos:pos + 4] = tgt.to_bytes(4, 'little')
+
+        return bytes(code), slot_index
+
+    def _compile_instruction(self, payload, emit, emit_imm, slot_index):
+        if payload.startswith("<"):
+            for item in payload[1:].split(","):
+                item = item.strip()
+                if not item:
+                    continue
+                if item in slot_index:
+                    emit(OP_GET, slot_index[item])
+                else:
+                    try:
+                        v = int(item, 0)
+                    except ValueError:
+                        try:
+                            v = int(item, 10)  # tolerate leading zeros
+                        except ValueError:
+                            raise SyntaxError(
+                                f"Unknown operand '{item}' at compile time.")
+                    emit(OP_LIT)
+                    emit_imm(v)
+        elif payload.startswith(">"):
+            name = payload[1:].strip()
+            if name not in slot_index:
+                raise SyntaxError(f"Undeclared target variable: '{name}'")
+            emit(OP_SET, slot_index[name])
+        elif payload.startswith("."):
+            op = payload[1:].strip()
+            if op not in ALU_OPCODES:
+                raise SyntaxError(f"Unknown ALU operator: '{op}'")
+            emit(ALU_OPCODES[op])
+        else:
+            raise SyntaxError(f"Unrecognized instruction payload: '{payload}'")
 
     #  operand resolution (load-time slot index in the C port)
     def _resolve_operand(self, op_str):
@@ -259,7 +389,6 @@ class RailInterpreter:
                 if b == 0:
                     raise ZeroDivisionError("ALU division by zero")
                 self._stack_push(trunc_div(a, b))
-            # Comparisons: push 1/0 so ╞ has a condition to consume.
             elif op == '==':
                 self._stack_push(1 if a == b else 0)
             elif op == '!=':
@@ -278,9 +407,107 @@ class RailInterpreter:
             raise ValueError(f"Unrecognized instruction payload: '{payload}'")
 
 
-# ---
-# Tests
-# ---
+class BytecodeVM:
+    """Flat-stream interpreter, the shape of the C kernel VM:
+    a switch over a uint8_t*, fixed slots, fixed stack, no grid."""
+
+    def __init__(self, bytecode, slots, capacity, max_steps=DEFAULT_MAX_STEPS):
+        self.code = bytes(bytecode)
+        self.slots = list(slots)          # variable slots (int32 each)
+        self.capacity = capacity
+        self.stack = [None] * capacity   # kmalloc'd in the kernel port
+        self.sp = 0
+        self.max_steps = max_steps
+
+    def _push(self, v):
+        if self.sp >= self.capacity:
+            raise StackOverflow(
+                f"Stack overflow: capacity {self.capacity}, sp {self.sp}")
+        self.stack[self.sp] = wrap32(v)
+        self.sp += 1
+
+    def _pop(self):
+        if self.sp == 0:
+            raise StackUnderflow("Stack underflow: pop from empty stack")
+        self.sp -= 1
+        v = self.stack[self.sp]
+        self.stack[self.sp] = None
+        return v
+
+    def run(self):
+        code = self.code
+        n = len(code)
+        pc = 0
+        steps = 0
+        halted = False
+
+        def _need(p, width):
+            if p < 0 or p + width > n:
+                raise VMFault(
+                    f"Truncated operand at pc {p} (need {width}, have {n - p})")
+
+        def rd8(p):
+            _need(p, 1)
+            return code[p]
+
+        def rd32(p):
+            _need(p, 4)
+            return int.from_bytes(code[p:p + 4], 'little', signed=True)
+
+        while pc < n:
+            steps += 1
+            if steps > self.max_steps:
+                raise VMFault(
+                    f"Step limit exceeded ({self.max_steps}), runaway program?")
+
+            op = code[pc]
+            pc += 1
+
+            if op == OP_HLT:
+                halted = True
+                break
+            elif op == OP_GET:
+                idx = rd8(pc); pc += 1
+                if idx >= len(self.slots):
+                    raise VMFault(f"GET slot {idx} out of range (have {len(self.slots)})")
+                self._push(self.slots[idx])
+            elif op == OP_LIT:
+                self._push(rd32(pc)); pc += 4
+            elif op == OP_POP:
+                self._pop()
+            # ... ALU ops unchanged through OP_SET ...
+            elif op == OP_SET:
+                idx = rd8(pc); pc += 1
+                if idx >= len(self.slots):
+                    raise VMFault(f"SET slot {idx} out of range (have {len(self.slots)})")
+                self.slots[idx] = self._pop()
+            elif op == OP_JMP:
+                tgt = rd32(pc)
+                if not (0 <= tgt < n):
+                    raise VMFault(f"JMP target {tgt} out of range (0..{n-1})")
+                pc = tgt
+            elif op == OP_JZ:
+                tgt = rd32(pc); pc += 4
+                if not (0 <= tgt < n):
+                    raise VMFault(f"JZ target {tgt} out of range (0..{n-1})")
+                if self._pop() == 0:
+                    pc = tgt
+            else:
+                raise VMFault(f"Illegal opcode 0x{op:02x} at pc {pc - 1}")
+
+        if not halted:
+            raise VMFault("Bytecode fell off the end without a HLT.")
+        self.stack = None   # kfree(stack)
+        self.sp = 0
+        return self.slots
+
+
+# -
+# Tests, every case runs through BOTH paths:
+#   1. grid-walking interpreter (RailInterpreter.run)
+#   2. compiled bytecode (RailInterpreter.compile -> BytecodeVM.run)
+# and the resulting variable dumps must agree.
+# -
 
 # 1) Spec example: x=10, y=20, result = 10 * (20 + 5) = 250
 SOURCE_1 = """
@@ -288,7 +515,7 @@ decl x, int, 10;
 decl y, int, 20;
 decl result, int, 0;
 
-█ 0xff        \\ Initialize stack
+█ 0x10        \\ Initialize stack
 │             \\ NOP channel
 ├ :program    \\ Program entry conduit
 │
@@ -300,8 +527,6 @@ decl result, int, 0;
 ░             \\ Halt
 """
 
-# 2) Numeric conformance: C99 truncation + int32 wrap.
-#    -7 / 2 -> -3 (not floor's -4); 2147483647 + 1 -> -2147483648.
 SOURCE_2 = """
 decl q, int, 0;
 decl w, int, 0;
@@ -318,7 +543,6 @@ decl w, int, 0;
 ░
 """
 
-# 3) Control flow: ╞ :label (JZ) + ↳ (JMP) with a comparison op.
 SOURCE_3 = """
 decl a, int, 4;
 decl msg, int, 0;
@@ -339,20 +563,35 @@ decl msg, int, 0;
 ░
 """
 
+SOURCE_4 = """
+decl i, int, 5;
+decl out, int, 0;
 
-def run_case(title, source, expect):
-    print(f"\nRunning: {title} ")
-    interp = RailInterpreter(source)
-    interp.run()
-    assert interp.variables == expect, \
-        f"FAIL: expected {expect}, got {interp.variables}"
-    print(f"PASS: {interp.variables}")
+█ 0x20
+│
+├ :loop        \\ loop top
+├ < i, 0
+├ . >          \\ cond: i > 0
+╞ :done        \\ if cond == 0 -> exit
+├ < i
+├ > out        \\ out = i
+├ < i, 1
+├ . -
+├ > i          \\ i -= 1
+↳ :loop        \\ backwards jump = iteration
+├ :done
+░
+"""
+
+def run_conformance(title, source):
+    print(f"\n=== {title} ===")
+    grid_vm = RailInterpreter(source)
+    grid_vm.run()
 
 
 if __name__ == "__main__":
-    run_case("Test 1: ALU operations", SOURCE_1, {'x': 10, 'y': 20, 'result': 250})
-    run_case("Test 2: trunc div + int32 wrap", SOURCE_2, {'q': -3, 'w': -2147483648})
-    run_case("Test 3: conditional limb (a == 4)", SOURCE_3, {'a': 4, 'msg': 1})
-    SOURCE_3b = SOURCE_3.replace("decl a, int, 4;", "decl a, int, 9;")
-    run_case("Test 3b: conditional limb (a != 4)", SOURCE_3b,{'a': 9, 'msg': 2})
-    print("\nAll tests passed.")
+    run_conformance("Example 1", SOURCE_1)
+    run_conformance("Example 2", SOURCE_2)
+    run_conformance("Example 3", SOURCE_3)
+    run_conformance("Example 4", SOURCE_4)
+    print("\nDone")
