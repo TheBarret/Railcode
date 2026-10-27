@@ -87,10 +87,10 @@ Stack operations use a fixed allocation rather than allocating memory for indivi
     decl task, int, 1;
     
     █ 0x10
-    ├ :loop    while (true) {
-    ├ < task      // do some computation...
+    ├ :loop    //while (true) {
+    ├ < task    // do some computation...
     ├ > task      
-    ↳ :loop    }
+    ↳ :loop    //}
     ░
 ```
 > Stack overflow, stack underflow, invalid instructions, and execution-budget exhaustion are runtime errors. 
