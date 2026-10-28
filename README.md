@@ -1,4 +1,4 @@
-# Railcode (Prototype, rev 0.4-experimental)
+# Railcode (Prototype, rev 0.5-experimental)
 
 A spatial, 2D grid-based stack machine designed for my [Symbiote kernel project](https://github.com/TheBarret/Symbiote-active).  
 
@@ -7,9 +7,16 @@ A spatial, 2D grid-based stack machine designed for my [Symbiote kernel project]
 
 ## 1. Overview & Core Principles
 
-The Rail-Code VM is a spatial, 2D grid-based stack machine.  
-Unlike linear esolangs, execution pathing is determined by topological rails and explicit active conduits  
-rather than a raw program counter increment (`PC++`).  
+Railcode is a NOTATION, not an architecture. Rows are read top to bottom;  
+the glyph at the start of a row selects the tier, column position carries no meaning yet.  
+
+**Rail glyphs (CP437):**  
+- ` █ `  stack allocation directive     (█ :0x10  -> 16 cells, exactly one, first)
+- ` ├ `  data tier     (< push, > store/drop, ALU words, . print, :label)
+- ` ╞ `  control tier  (== != < > <= >= :label   -- forward only, pops 2)
+- ` ↳ `  unconditional jump (↳ :label            -- backward only)
+- ` │ `  pass-through rail (no code)
+- ` ░ `  halt
 
 * **Spatial Execution Vector:**   
   The Instruction Pointer (IP) tracks coordinates (`X, Y`).  
@@ -23,20 +30,9 @@ rather than a raw program counter increment (`PC++`).
   Variable names are resolved to fixed-index slots at load time, eliminating runtime dictionary overhead.
 
 **Axioms:**  
-  1. Spatial IP: position (`X, Y`). Default flow is gravity (`Y++`);  
-     a rail row is discharged before the IP falls.  
-  2. Two regions: the header (symbol space, linearly tokenized)  
-     and the rail (execution space, spatially traversed).  
-  3. Two glyph tiers: `├` = data path (stack / ALU ops),  
-                      `╞` = control path (branches / conditionals).  
-
-**Rail glyphs (CP437):**  
--  `█`   stack allocation directive   (`█ :0x10`  -> 16 cells)
--  `├`   data-tier instruction        (`<` push, `>` store, `+ - *` ALU, `.` print)
--  `╞`   control-tier instruction     (`== != < >, :label`)
--  `↳`   unconditional jump           (`↳ :label`)
--  `│`   vertical pass-through rail
--  `░`   halt / ground
+  1. Spatial IP: position (`X, Y`). Default flow is gravity (`Y++`); a rail row is discharged before the IP falls.  
+  2. Two regions: the header (symbol space, linearly tokenized) and the rail (execution space, spatially traversed).  
+  3. Two glyph tiers: `├` = data path (stack / ALU ops), `╞` = control path (branches / conditionals).  
 
 Header (tokenized before the IP ever drops):  
   `declare <symbol>, <type>, <value>;`  
@@ -62,5 +58,17 @@ Example of a count-down:
   ├ :end
   ░
 ```
+
+## Changelog
+
+- A bare `█ :10` parsed as **decimal**, or `█ :0x10` for hexadecimal.
+- Incorrect `├ . +` syntax now faults.
+- `PUSH` is split internally into `LIT` and `GET` atoms, so one row can yield several atoms.
+- **Forward and backward rules:** conditional jumps must go forward and `↳` must go backward, enforced by the binder (`E_DIRECTION`). 
+- **Verifier:** One pass proves that stack depth agrees at every merge, including loop heads, with no underflow, no overflow past `█`, no dead code.
+- **Value space:** int32 only, with wrapping and C-style truncating `/` and `%`. String declarations are rejected (`E_TYPE`).
+- **Added ops:** `dup`, `swap`, `over`, `/ % & | ^`, and `<=` / `>=` in `╞`. The stack-effect table drives both the verifier and the runtime checks.
+- **I/O:** `├ .` calls `out` sink instead of a hard-wired (stdout) `print`.
+- **Debug flags:** `--atoms`, `--code`, `--trace`, and `--fuel N`.
 
 ---
