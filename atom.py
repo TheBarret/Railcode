@@ -1,66 +1,83 @@
-"""Pass 1: grid -> atom list. One atom per executable rail row."""
+"""
+Pass 1: rail rows -> atoms. Dumb on purpose: classify, validate shape, nothing else.
+Atom = (op, arg, row). Operand kinds: int (LIT/ALLOC), name (GET/STORE), label.
+"""
 import re
-from railcode import (RAIL_CHARS, EXEC_CHARS, first_glyph, tokenize_header, build_grid)
+from collections import namedtuple
+from railcode import AtomError, parse_int, is_int
 
-class AtomError(Exception):
-    pass
+Atom = namedtuple("Atom", "op arg row")
 
-def atomize(grid):
+IDENT     = re.compile(r"[A-Za-z_]\w*$")
+LABEL_REF = re.compile(r":\s*([A-Za-z_]\w*)$")
+COND      = re.compile(r"(==|!=|<=|>=|<|>)\s*:\s*([A-Za-z_]\w*)$")
+
+ALU_WORDS = {"+": "ADD", "-": "SUB", "*": "MUL", "/": "DIV", "%": "MOD",
+             "&": "AND", "|": "OR", "^": "XOR", ".": "PRINT",
+             "dup": "DUP", "swap": "SWAP", "over": "OVER"}
+COND_OPS  = {"==": "JEQ", "!=": "JNE", "<": "JLT", ">": "JGT", "<=": "JLE", ">=": "JGE"}
+
+
+def atomize(rail):
     atoms = []
-    for y, row in enumerate(grid):
-        x, g = first_glyph(row)
-        if x is None or g == "│":
-            continue
-        rest = row[x + 1:].strip()
-        atoms.append(_atom(g, rest))
+    for r in rail:
+        atoms.extend(_atoms(r))
     return atoms
 
 
-def _atom(g, rest):
+def _atoms(r):
+    g, rest, y = r.glyph, r.rest, r.lineno
+    if g == "│":
+        if rest:
+            raise AtomError("E_OPERAND", f"│ takes no operand: {rest!r}", y)
+        return []
     if g == "░":
-        return ("HALT",)
+        if rest:
+            raise AtomError("E_OPERAND", f"░ takes no operand: {rest!r}", y)
+        return [Atom("HALT", None, y)]
     if g == "█":
-        tok = rest.lstrip(":").strip()
-        try:
-            return ("ALLOC", int(tok, 16))
-        except ValueError:
-            raise AtomError(f"bad █ operand: {tok!r}")
+        n = parse_int(rest.lstrip(":"), y, AtomError, "E_ALLOC")
+        if n <= 0:
+            raise AtomError("E_ALLOC", "stack size must be positive", y)
+        return [Atom("ALLOC", n, y)]
     if g == "↳":
-        return ("JMP", rest.lstrip(":").strip())
-
-    op, arg = _split(rest)
-
-    if g == "├":
-        if op.startswith(":"):
-            return ("LABEL", op[1:].strip())
-        if op == "<":
-            return ("PUSH", [t.strip() for t in arg.split(",")])
-        if op == ">":
-            return ("STORE", arg.strip())
-        if op in ("+", "-", "*"):
-            return ({"+": "ADD", "-": "SUB", "*": "MUL"}[op],)
-        if op == ".":
-            return ("PRINT",)
-        raise AtomError(f"bad ├ op: {op!r}")
-
+        m = LABEL_REF.fullmatch(rest)
+        if not m:
+            raise AtomError("E_LABEL", f"↳ needs ':label', got {rest!r}", y)
+        return [Atom("JMP", m.group(1), y)]
     if g == "╞":
-        if op not in ("==", "!=", "<", ">"):
-            raise AtomError(f"bad ╞ op: {op!r}")
-        return ({"==": "JEQ", "!=": "JNE",
-                 "<": "JLT", ">": "JGT"}[op],
-                arg.lstrip(":").strip())
-
-    raise AtomError(f"unknown glyph: {g!r}")
+        m = COND.fullmatch(rest)
+        if not m:
+            raise AtomError("E_OP", f"bad ╞ form (want '<cmp> :label'): {rest!r}", y)
+        return [Atom(COND_OPS[m.group(1)], m.group(2), y)]
+    return _data(rest, y)          # g == "├"
 
 
-def _split(rest):
-    """'<' 'x, 10'  -> ('<', 'x, 10');  ':' 'loop' -> (':loop', '')."""
-    rest = rest.strip()
+def _data(rest, y):
     if not rest:
-        return "", ""
-    if rest[0] in "<>+-*.":
-        return rest[0], rest[1:].strip()
-    if rest[0] == ":":
-        return rest, ""                       # label marker
-    parts = rest.split(None, 1)
-    return parts[0], (parts[1] if len(parts) > 1 else "")
+        raise AtomError("E_OP", "empty ├ row", y)
+    if rest.startswith(":"):
+        m = LABEL_REF.fullmatch(rest)
+        if not m:
+            raise AtomError("E_LABEL", f"bad label definition: {rest!r}", y)
+        return [Atom("LABEL", m.group(1), y)]
+    if rest[0] == "<":
+        out = []
+        for tok in (t.strip() for t in rest[1:].split(",")):
+            if is_int(tok):
+                out.append(Atom("LIT", parse_int(tok, y), y))
+            elif IDENT.match(tok):
+                out.append(Atom("GET", tok, y))
+            else:
+                raise AtomError("E_OPERAND", f"bad push operand: {tok!r}", y)
+        return out
+    if rest[0] == ">":
+        name = rest[1:].strip()
+        if not name:
+            return [Atom("DROP", None, y)]
+        if not IDENT.match(name):
+            raise AtomError("E_OPERAND", f"bad store target: {name!r}", y)
+        return [Atom("STORE", name, y)]
+    if rest in ALU_WORDS:
+        return [Atom(ALU_WORDS[rest], None, y)]
+    raise AtomError("E_OPERAND", f"unknown ├ op or trailing operands: {rest!r}", y)
