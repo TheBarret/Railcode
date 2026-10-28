@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Railcode prototype interpreter.
-
+version: experimental-0.4
 Axioms:
   1. Spatial IP: position (X, Y). Default flow is gravity (Y++);
      a rail row is discharged before the IP falls.
@@ -30,7 +30,11 @@ import sys
 
 RAIL_CHARS = set("█├╞↳│░")
 EXEC_CHARS = set("█├╞↳░")
-
+EMPTY_RAILCODE = """
+█ :0x01
+│
+░
+"""
 
 class RailError(Exception):
     """ lexing / parsing / runtime fault in the rail"""
@@ -41,9 +45,7 @@ class RailError(Exception):
 def tokenize_header(src):
     """Region 1: linear tokenization of declarations into symbol space."""
     symbols = {}
-    for m in re.finditer(
-        r"declare\s+([A-Za-z_]\w*)\s*,\s*(\w+)\s*,\s*([^;]+);", src
-    ):
+    for m in re.finditer(r"declare\s+([A-Za-z_]\w*)\s*,\s*(\w+)\s*,\s*([^;]+);", src):
         name, _typ, raw = m.groups()
         raw = raw.strip()
         if re.fullmatch(r"-?\d+", raw):
@@ -109,7 +111,7 @@ class Machine:
             return self.symbols[tok]
         raise RailError(f"unknown symbol: {tok!r}")
 
-    # -- gravity: fall to the next executable row, skipping │ rails
+    # gravity: fall to the next executable row, skipping │ rails
     def fall(self, y):
         ny = y + 1
         while ny < len(self.grid):
@@ -119,7 +121,7 @@ class Machine:
             ny += 1
         return len(self.grid)  # fell off the world
 
-    def run(self, max_steps=1_000_000):
+    def run(self, max_steps : int = 1):
         y = 0
         while y < len(self.grid):
             if self.steps > max_steps:
@@ -219,43 +221,3 @@ class Machine:
         if not self.stack:
             raise RailError("pop on empty stack")
         return self.stack.pop()
-
-
-#  RAILCODE_SRC
-
-RAILCODE_SRC = """
-// header
-declare x, int, 0;
-
-// rail
-█ :0x10
-├ :loop
-│
-├ < x, 10
-╞ == :end
-│
-├ < x, 1
-├ +
-├ > x
-│
-↳ :loop
-│
-├ :end
-░
-"""
-
-def main():
-    if len(sys.argv) > 1:
-        with open(sys.argv[1], encoding="utf-8") as f:
-            src = f.read()
-    else:
-        src = RAILCODE_SRC
-    result = Machine(src).run()
-    status = "halted on ░" if result["halted"] else "fell off the rail"
-    print(f"[rc] {status} after {result['steps']} steps")
-    for name, value in result["symbols"].items():
-        print(f"[rc]   {name} = {value!r}")
-
-
-if __name__ == "__main__":
-    main()
