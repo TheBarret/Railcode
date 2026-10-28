@@ -1,223 +1,112 @@
-#!/usr/bin/env python3
-"""Railcode prototype interpreter.
-version: experimental-0.4
-Axioms:
-  1. Spatial IP: position (X, Y). Default flow is gravity (Y++);
-     a rail row is discharged before the IP falls.
-  2. Two regions: the header (symbol space, linearly tokenized)
-     and the rail (execution space, spatially traversed).
-  3. Two glyph tiers:  ├ = data path (stack / ALU ops),
-                       ╞ = control path (branches / conditionals).
+"""Railcode frontend  --  version: experimental-0.5
+
+Railcode is a NOTATION, not an architecture. Rows are read top to bottom;
+the glyph at the start of a row selects the tier. Column position carries no
+meaning yet (the 2D / heading model is a later experiment).
 
 Rail glyphs (CP437):
-  █   stack allocation directive   (█ :0x10  -> 16 cells)
-  ├   data-tier instruction       (< push, > store, + - * ALU, . print)
-  ╞   control-tier instruction     (== != < >  :label)
-  ↳   unconditional jump           (↳ :label)
-  │   vertical pass-through rail
-  ░   halt / ground
+  █   stack allocation directive     (█ :0x10  -> 16 cells, exactly one, first)
+  ├   data tier     (< push, > store/drop, ALU words, . print, :label)
+  ╞   control tier  (== != < > <= >= :label   -- forward only, pops 2)
+  ↳   unconditional jump (↳ :label            -- backward only)
+  │   pass-through rail (no code)
+  ░   halt
 
-Header (tokenized before the IP ever drops):
-  declare <symbol>, <type>, <value>;
+Header (one declaration per line, int only):
+  declare <symbol>, int, <value>;
 
-Usage:
-  python railcode.py program.rail      # run a source file
-  python railcode.py                   # run the built-in RAILCODE_SRC
+Numbers: decimal, 0x.., 0b.., optional sign, int32 range. (0.5: a bare
+'█ :10' is DECIMAL; 0.4 parsed it as hex.)
 """
-
 import re
-import sys
+from collections import namedtuple
 
+VERSION = "experimental-0.5"
 RAIL_CHARS = set("█├╞↳│░")
-EXEC_CHARS = set("█├╞↳░")
+INT32_MIN, INT32_MAX = -(2 ** 31), 2 ** 31 - 1
+MAX_SLOTS = 256
+
 EMPTY_RAILCODE = """
 █ :0x01
 │
 ░
 """
 
+
 class RailError(Exception):
-    """ lexing / parsing / runtime fault in the rail"""
+    """Single fault type for every stage. code = stable reason, row = source line."""
+    def __init__(self, code, msg, row=None):
+        self.code, self.msg, self.row = code, msg, row
+        loc = f"row {row}: " if row else ""
+        super().__init__(f"[{code}] {loc}{msg}")
+
+class AtomError(RailError):   pass
+class BindError(RailError):   pass
+class VerifyError(RailError): pass
+class VMError(RailError):     pass
 
 
-#  header
+#  numbers: the ONLY place integers are parsed
+_INT = re.compile(r"[+-]?(0[xX][0-9a-fA-F]+|0[bB][01]+|\d+)$")
 
-def tokenize_header(src):
-    """Region 1: linear tokenization of declarations into symbol space."""
+def is_int(tok):
+    return bool(_INT.match(tok.strip()))
+
+def parse_int(tok, row=None, cls=RailError, code="E_INT"):
+    tok = tok.strip()
+    if not _INT.match(tok):
+        raise cls(code, f"not an integer: {tok!r}", row)
+    neg = tok.startswith("-")
+    body = tok.lstrip("+-").lower()
+    v = int(body, 0) if body[:2] in ("0x", "0b") else int(body, 10)
+    v = -v if neg else v
+    if not INT32_MIN <= v <= INT32_MAX:
+        raise cls("E_RANGE", f"{tok!r} does not fit int32", row)
+    return v
+
+def wrap32(v):
+    return ((v + 2 ** 31) & 0xFFFFFFFF) - 2 ** 31
+
+
+#  source splitting (comments are stripped exactly once, here)
+Row = namedtuple("Row", "lineno x glyph rest")
+_DECL_START = re.compile(r"\s*declare\b")
+_DECL = re.compile(r"declare\s+([A-Za-z_]\w*)\s*,\s*(\w+)\s*,\s*([^;]+);$")
+
+def split_source(src):
+    """-> (header_rows, rail_rows), each a list of (lineno, text)."""
+    header, rail = [], []
+    for lineno, line in enumerate(src.splitlines(), 1):
+        code = line.split("//", 1)[0].rstrip()
+        if not code.strip():
+            continue
+        (header if _DECL_START.match(code) else rail).append((lineno, code))
+    return header, rail
+
+def tokenize_header(header_rows):
+    """Region 1: declarations -> ordered {name: int}."""
     symbols = {}
-    for m in re.finditer(r"declare\s+([A-Za-z_]\w*)\s*,\s*(\w+)\s*,\s*([^;]+);", src):
-        name, _typ, raw = m.groups()
-        raw = raw.strip()
-        if re.fullmatch(r"-?\d+", raw):
-            symbols[name] = int(raw)
-        elif raw.startswith('"') and raw.endswith('"'):
-            symbols[name] = raw[1:-1]
-        else:
-            symbols[name] = raw
+    for lineno, text in header_rows:
+        m = _DECL.match(text.strip())
+        if not m:
+            raise RailError("E_DECL", f"malformed declaration: {text.strip()!r}", lineno)
+        name, typ, raw = m.groups()
+        if typ != "int":
+            raise RailError("E_TYPE", f"type {typ!r} unsupported in 0.5 (int only)", lineno)
+        if name in symbols:
+            raise RailError("E_DUP_SYM", f"duplicate declaration: {name!r}", lineno)
+        symbols[name] = parse_int(raw, lineno)
+    if len(symbols) > MAX_SLOTS:
+        raise RailError("E_SLOTS", f"{len(symbols)} symbols exceeds {MAX_SLOTS}")
     return symbols
 
-
-#  rail grid
-
-def build_grid(src):
-    """Region 2: the rail. Comments stripped, non-rail lines dropped."""
-    grid = []
-    for line in src.splitlines():
-        code = line.split("//", 1)[0].rstrip()
-        if any(ch in RAIL_CHARS for ch in code):
-            grid.append(code)
-    return grid
-
-
-def first_glyph(row):
-    """Locate the leading rail glyph of a row: the IP's (X, Y) anchor."""
-    for x, ch in enumerate(row):
-        if ch in RAIL_CHARS:
-            return x, ch
-    return None, None
-
-
-def collect_labels(grid):
-    """Pre-pass: resolve ':label' definitions to grid coordinates (Y)."""
-    labels = {}
-    for y, row in enumerate(grid):
-        x, glyph = first_glyph(row)
-        if x is None or glyph in "█↳":
-            continue
-        rest = row[x + 1:].strip()
-        if rest.startswith(":"):
-            labels[rest[1:].strip()] = y
-    return labels
-
-
-#  machine
-
-class Machine:
-    def __init__(self, src):
-        self.symbols = tokenize_header(src)
-        self.grid = build_grid(src)
-        self.labels = collect_labels(self.grid)
-        self.stack = []
-        self.capacity = 0
-        self.steps = 0
-
-    def resolve(self, tok):
-        tok = tok.strip()
-        if re.fullmatch(r"-?\d+", tok):
-            return int(tok)
-        if re.fullmatch(r"0[xX][0-9a-fA-F]+", tok):
-            return int(tok, 16)
-        if tok in self.symbols:
-            return self.symbols[tok]
-        raise RailError(f"unknown symbol: {tok!r}")
-
-    # gravity: fall to the next executable row, skipping │ rails
-    def fall(self, y):
-        ny = y + 1
-        while ny < len(self.grid):
-            x, glyph = first_glyph(self.grid[ny])
-            if x is not None and glyph in EXEC_CHARS:
-                return ny
-            ny += 1
-        return len(self.grid)  # fell off the world
-
-    def run(self, max_steps : int = 1):
-        y = 0
-        while y < len(self.grid):
-            if self.steps > max_steps:
-                raise RailError("step limit exceeded (runaway rail)")
-            x, glyph = first_glyph(self.grid[y])
-            if x is None:
-                y += 1
-                continue
-            row = self.grid[y]
-            rest = row[x + 1:].strip()
-
-            #  ░ the ground: halt
-            if glyph == "░":
-                return {"halted": True, "steps": self.steps,
-                        "symbols": self.symbols, "capacity": self.capacity}
-
-            #  │ pass-through
-            if glyph == "│":
-                y += 1
-                continue
-
-            #  █ allocation directive
-            if glyph == "█":
-                tok = rest.lstrip(":").strip()
-                try:
-                    self.capacity = int(tok, 16)
-                except ValueError:
-                    raise RailError(f"bad █ operand: {tok!r}")
-                self.stack = []
-                y += 1
-                continue
-
-            #  ↳ unconditional jump
-            if glyph == "↳":
-                label = rest.lstrip(":").strip()
-                if label not in self.labels:
-                    raise RailError(f"unknown label: {label!r}")
-                self.steps += 1
-                y = self.labels[label]
-                continue
-
-            op = rest.split()[0] if rest else ""
-            argstr = rest[len(op):].strip()
-
-            #  ├ data tier
-            if glyph == "├":
-                if op.startswith(":"):          # label definition
-                    y += 1
-                    continue
-                if op == "<":                   # push operands
-                    for a in argstr.split(","):
-                        self.stack.append(self.resolve(a))
-                elif op == ">":                 # pop, store into symbol
-                    if not self.stack:
-                        raise RailError("store on empty stack")
-                    self.symbols[argstr.strip()] = self.stack.pop()
-                elif op in ("+", "-", "*"):
-                    b = self._pop()
-                    a = self._pop()
-                    if op == "+":
-                        self.stack.append(a + b)
-                    elif op == "-":
-                        self.stack.append(a - b)
-                    else:
-                        self.stack.append(a * b)
-                elif op == ".":
-                    print(self._pop())
-                else:
-                    raise RailError(f"bad ├ op: {op!r}")
-
-            #  ╞ control tier
-            elif glyph == "╞":
-                label = argstr.lstrip(":").strip()
-                if label not in self.labels:
-                    raise RailError(f"unknown label: {label!r}")
-                b = self._pop()
-                a = self._pop()
-                conds = {
-                    "==": a == b, "!=": a != b,
-                    "<": a < b, ">": a > b,
-                }
-                if op not in conds:
-                    raise RailError(f"bad ╞ op: {op!r}")
-                if conds[op]:                   # true -> divert the rail
-                    self.steps += 1
-                    y = self.labels[label]
-                    continue
-                # false -> let gravity take over
-
-            self.steps += 1
-            y = self.fall(y)
-
-        return {"halted": False, "steps": self.steps,
-                "symbols": self.symbols, "capacity": self.capacity}
-
-    def _pop(self):
-        if not self.stack:
-            raise RailError("pop on empty stack")
-        return self.stack.pop()
+def build_rail(rail_rows):
+    """Region 2: every row must START with a rail glyph (stray text is a fault)."""
+    rows = []
+    for lineno, text in rail_rows:
+        x = len(text) - len(text.lstrip())
+        g = text[x]
+        if g not in RAIL_CHARS:
+            raise RailError("E_STRAY", f"row does not start with a rail glyph: {text.strip()!r}", lineno)
+        rows.append(Row(lineno, x, g, text[x + 1:].strip()))
+    return rows
