@@ -1,0 +1,21 @@
+// header
+declare x, int, 0;
+
+// rail
+█ :2
+│
+├ :loop
+├ < x, 10
+╞ == :end
+│
+├ < x, 1
+├ +
+├ > x
+│
+├ < x
+├ .
+│
+↳ :loop
+├ :end
+│
+░
