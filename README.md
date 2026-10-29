@@ -63,6 +63,9 @@ Example of a count-down:
 
 > Tab's and spaces matter in this context, re-aligning this (cosmetically) can produce parsing errors.
 
+<img width="1240" height="711" alt="output" src="https://github.com/user-attachments/assets/5fa2a4b9-a1a2-4e7c-95be-0e031e930a44" />
+
+
 ## Changelog
 
 - A bare `█ :10` parsed as **decimal**, or `█ :0x10` for hexadecimal.
