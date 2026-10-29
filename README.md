@@ -43,21 +43,25 @@ Example of a count-down:
   declare x, int, 0;
   
   // rail
-  █ :0x10        // kmalloc(16)
+  █ :2            // STACK_OPEN (= kmalloc(2xint))
+  │               // NOP's
   ├ :loop
+  ├ < x, 255     // PUSH x, 255
+  ╞ == :end      // JEQ [loop]
   │
-  ├ < x, 10      // push x, 10
-  ╞ == :end      // jump { end } if x == 10 
+  ├ < x, 1       // PUSH x, 1
+  ├ +            // ADD
+  ├ > x          // POP x
   │
-  ├ < x, 1       // push x, 1
-  ├ +            // addition
-  ├ > x          // pop 
-  │
-  ↳ :loop        // loop back
-  │
+  ↳ :loop        // JMP [loop]
   ├ :end
-  ░
+  ├ < x          // PUSH x
+  ├ .           // POP, PRINTF
+  │
+  ░               // STACK_CLOSE (= HALT, kfree())
 ```
+
+> Tab's and spaces matter in this context, re-aligning this (cosmetically) can produce parsing errors.
 
 ## Changelog
 
