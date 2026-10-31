@@ -2,31 +2,6 @@
 
 A spatial, 2D grid-based stack machine designed for my [Symbiote kernel project](https://github.com/TheBarret/Symbiote-active).  
 
-# Usage 
-```
-python railcode.py --help
-usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [file]
-
-Railcode experimental-0.5
-
-positional arguments:
-  file
-
-options:
-  -h, --help   show this help message and exit
-  --atoms      low-pass 1 output
-  --code       low-pass 2 output
-  --trace      print pc/op/stack per step
-  --fuel FUEL  max loop fuel (↳ back-edges)
-
-```
-
-<img width="1256" height="660" alt="image" src="https://github.com/user-attachments/assets/edeed921-e36c-4f2b-a3cf-c1c3e7f14b43" />  
-
-# Specification & Architecture
-
-## 1. Overview & Core Principles
-
 Railcode is a NOTATION, not an architecture. Rows are read top to bottom;  
 the glyph at the start of a row selects the tier, column position carries no meaning yet.  
 
@@ -83,6 +58,29 @@ Example of a count-down:
 
 > Tab's and spaces matter in this context, re-aligning this (cosmetically) can produce parsing errors.  
 
+# Usage 
+```
+python railcode.py --help
+usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [file]
+
+Railcode experimental-0.5
+
+positional arguments:
+  file
+
+options:
+  -h, --help   show this help message and exit
+  --atoms      low-pass 1 output
+  --code       low-pass 2 output
+  --trace      print pc/op/stack per step
+  --fuel FUEL  max loop fuel (↳ back-edges)
+
+```
+
+<img width="1256" height="660" alt="image" src="https://github.com/user-attachments/assets/edeed921-e36c-4f2b-a3cf-c1c3e7f14b43" />  
+
+
+
 ## Changelog
 
 - A bare `█ :10` parsed as **decimal**, or `█ :0x10` for hexadecimal.
@@ -94,5 +92,5 @@ Example of a count-down:
 - **Added ops:** `dup`, `swap`, `over`, `/ % & | ^`, and `<=` / `>=` in `╞`. The stack-effect table drives both the verifier and the runtime checks.
 - **I/O:** `├ .` calls `out` sink instead of a hard-wired (stdout) `print`.
 - **Debug flags:** `--atoms`, `--code`, `--trace`, and `--fuel N`.
-
+- **refactored codebase**: merged codebase a smaller file profile.  
 ---
