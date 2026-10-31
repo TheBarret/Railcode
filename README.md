@@ -71,7 +71,7 @@ Example of a count-down:
 
 # Usage 
 ```
-python railcode.py --help
+> python railcode.py --help
 usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [-o OUTPUT] [file]
 
 Railcode experimental-0.5
@@ -94,7 +94,7 @@ options:
 > python railcode.py -o sample.rbc sample.rail
 Compiled: sample.rbc (93 bytes)
 
->python railcode.py sample.rbc
+> python railcode.py sample.rbc
 2
 4
 6
