@@ -1,21 +1,18 @@
 // header
 declare x, int, 0;
+declare y, int, 16;
 
 // rail
-█ :2
+█ :2        // initialize stack
 │
-├ :loop
-├ < x, 10
-╞ == :end
-│
-├ < x, 1
+├ :head
+├ < x, 16
+╞ >= :tail
+├ < x, y
 ├ +
 ├ > x
+↳ :head
+├ :tail
 │
-├ < x
-├ .
-│
-↳ :loop
-├ :end
-│
+├ < 0,0     // reset stack
 ░
