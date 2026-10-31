@@ -6,12 +6,23 @@ Railcode is a NOTATION, not an architecture. Rows are read top to bottom;
 the glyph at the start of a row selects the tier, column position carries no meaning yet.  
 
 **Rail glyphs (CP437):**  
-- ` █ `  stack allocation directive     (█ :0x10  -> 16 cells, exactly one, first)
-- ` ├ `  data tier     (< push, > store/drop, ALU words, . print, :label)
-- ` ╞ `  control tier  (== != < > <= >= :label   -- forward only, pops 2)
-- ` ↳ `  unconditional jump (↳ :label            -- backward only)
-- ` │ `  pass-through rail (no code)
-- ` ░ `  halt
+- ` █ `  stack allocation directive     (`█ :<n>`, n-slots)
+
+- ` ├ `  data tier:
+  * `<` push
+  * `>` store/drop
+  * `+-*/` ALU words
+  * `swap/dup/over` Stack words
+  * `.` IO print
+  * `:label` addressing
+
+- ` ╞ `  control tier:
+  * `==, !=, <, >, <=, >=, :label` forward only, pops two values
+
+- ` ↳ `  unconditional jump (`↳`, `:label` -- backward only)
+
+- ` │ `  pass-through rail (`nop`, stack real-estate)
+- ` ░ `  halt (close and exit)
 
 * **Spatial Execution Vector:**   
   The Instruction Pointer (IP) tracks coordinates (`X, Y`).  
@@ -42,7 +53,7 @@ Example of a count-down:
   │               // NOP's
   ├ :loop
   ├ < x, 255     // PUSH x, 255
-  ╞ == :end      // JEQ [loop]
+  ╞ == :end      // JEQ
   │
   ├ < x, 1       // PUSH x, 1
   ├ +            // ADD
