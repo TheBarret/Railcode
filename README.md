@@ -72,7 +72,7 @@ Example of a count-down:
 # Usage 
 ```
 python railcode.py --help
-usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [file]
+usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [-o OUTPUT] [file]
 
 Railcode experimental-0.5
 
@@ -80,13 +80,37 @@ positional arguments:
   file
 
 options:
-  -h, --help   show this help message and exit
-  --atoms      low-pass 1 output
-  --code       low-pass 2 output
-  --trace      print pc/op/stack per step
-  --fuel FUEL  max loop fuel (↳ back-edges)
-
+  -h, --help            show this help message and exit
+  --atoms               low-pass 1 output
+  --code                low-pass 2 output
+  --trace               print pc/op/stack per step
+  --fuel FUEL           max loop fuel (↳ back-edges)
+  -o OUTPUT, --output OUTPUT
+                        compile binary from source
 ```
+
+**To Bytecode:**  
+```
+> python railcode.py -o sample.rbc sample.rail
+Compiled: sample.rbc (93 bytes)
+
+>python railcode.py sample.rbc
+2
+4
+6
+8
+10
+12
+14
+16
+! halted: steps=86 fuel_used=8 stack=[0, 0]
+Debug symbols:
+x = 16
+y = 2
+```
+
+
+---
 
 ## Changelog
 
