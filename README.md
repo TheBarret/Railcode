@@ -88,10 +88,6 @@ options:
 
 ```
 
-<img width="1256" height="660" alt="image" src="https://github.com/user-attachments/assets/edeed921-e36c-4f2b-a3cf-c1c3e7f14b43" />  
-
-
-
 ## Changelog
 
 - A bare `█ :10` parsed as **decimal**, or `█ :0x10` for hexadecimal.
