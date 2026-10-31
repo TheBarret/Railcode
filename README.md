@@ -2,6 +2,26 @@
 
 A spatial, 2D grid-based stack machine designed for my [Symbiote kernel project](https://github.com/TheBarret/Symbiote-active).  
 
+# Usage 
+```
+python railcode.py --help
+usage: railcode [-h] [--atoms] [--code] [--trace] [--fuel FUEL] [file]
+
+Railcode experimental-0.5
+
+positional arguments:
+  file
+
+options:
+  -h, --help   show this help message and exit
+  --atoms      low-pass 1 output
+  --code       low-pass 2 output
+  --trace      print pc/op/stack per step
+  --fuel FUEL  max loop fuel (↳ back-edges)
+
+```
+
+<img width="1256" height="660" alt="image" src="https://github.com/user-attachments/assets/edeed921-e36c-4f2b-a3cf-c1c3e7f14b43" />  
 
 # Specification & Architecture
 
@@ -61,10 +81,7 @@ Example of a count-down:
   ░               // STACK_CLOSE (= HALT, kfree())
 ```
 
-> Tab's and spaces matter in this context, re-aligning this (cosmetically) can produce parsing errors.
-
-<img width="1240" height="711" alt="output" src="https://github.com/user-attachments/assets/5fa2a4b9-a1a2-4e7c-95be-0e031e930a44" />
-
+> Tab's and spaces matter in this context, re-aligning this (cosmetically) can produce parsing errors.  
 
 ## Changelog
 
