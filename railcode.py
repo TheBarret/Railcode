@@ -7,6 +7,7 @@ import argparse
 import re
 import sys
 from collections import namedtuple
+from bytecode import serialize_program, deserialize_program
 from errors import RailError
 
 
@@ -104,17 +105,25 @@ def main(argv=None):
     ap.add_argument("--code",  action="store_true", help="low-pass 2 output")
     ap.add_argument("--trace", action="store_true", help="print pc/op/stack per step")
     ap.add_argument("--fuel",  type=int, default=256, help="max loop fuel (↳ back-edges)")
+    ap.add_argument("-o", "--output", help="compile binary from source")
     a = ap.parse_args(argv)
 
     try:
-        src = open(a.file, encoding="utf-8").read() if a.file else EMPTY_RAILCODE
-    except OSError as e:
-        print(f"Error: {e}", file=sys.stderr)
-        return 1
-
-    try:
-        # builders
-        atoms, prog, peak = build_program(src)
+        if a.file and a.file.endswith(".rbc"):
+            data = open(a.file, "rb").read()
+            prog = deserialize_program(data)
+            peak = None # Peak depth was verified at compile time
+        else:
+            # Compile source code
+            src = open(a.file, encoding="utf-8").read() if a.file else EMPTY_RAILCODE
+            atoms, prog, peak = build_program(src)
+        # options
+        if a.output:
+            bytecode_data = serialize_program(prog)
+            with open(a.output, "wb") as f:
+                f.write(bytecode_data)
+            print(f"Compiled: {a.output} ({len(bytecode_data)} bytes)")
+            return 0
         if a.atoms:
             for x in atoms:
                 print("atom ", tuple(x))
@@ -126,7 +135,9 @@ def main(argv=None):
         tr = (lambda pc, i, st: print(f"  [{pc:3}] {i.op:<6} {i.arg!s:<5} stack={st}")) if a.trace else None
 
         r = VM(prog).run(a.fuel, tr)
-
+    except OSError as e:
+        print(f"Host error: {e}", file=sys.stderr)
+        return 1
     except RailError as e:
         print(f"railcode fault: {e}", file=sys.stderr)
         return 1
