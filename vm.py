@@ -1,9 +1,12 @@
 """
-Pass 4: the machine. Sees only Program (ints, slots, pcs). No names, no glyphs.
-Re-runnable: all state is built inside run().
+Railcode 0.5 -- pass 4: the machine.
+
+Sees only Program (ints, slots, pcs). No names, no glyphs. Re-runnable:
+all state is built inside run().
 """
-from railcode import VMError, RailError, wrap32
-from spec import OPS
+from errors import RailError
+from railcode import wrap32
+from opcodes import OPS
 
 
 def _tdiv(a, b):                       # truncating (C-style) division
@@ -21,6 +24,10 @@ CMP = {
     "JLE": lambda a, b: a <= b,  "JGE": lambda a, b: a >= b,
 }
 
+# Dispatch-table / ISA agreement: every op name in BIN/CMP must exist in OPS.
+# Caught at import; a typo fails on module load, not at first execution.
+assert set(BIN) | set(CMP) <= set(OPS)
+
 
 class VM:
     def __init__(self, program, out=print):
@@ -35,7 +42,7 @@ class VM:
         try:
             while True:
                 if not 0 <= pc < len(code):
-                    raise VMError("E_FALL_OFF", "pc left the program")
+                    raise RailError("E_FALL_OFF", "pc left the program")
                 ins = code[pc]
                 op, arg = ins.op, ins.arg
                 spec = OPS[op]
@@ -43,9 +50,9 @@ class VM:
                 if trace:
                     trace(pc, ins, stack[:sp])
                 if sp < spec.pops:
-                    raise VMError("E_UNDERFLOW", f"{op} needs {spec.pops}", ins.row)
+                    raise RailError("E_UNDERFLOW", f"{op} needs {spec.pops}", ins.row)
                 if sp - spec.pops + spec.pushes > p.capacity:
-                    raise VMError("E_OVERFLOW", f"{op} exceeds capacity {p.capacity}", ins.row)
+                    raise RailError("E_OVERFLOW", f"{op} exceeds capacity {p.capacity}", ins.row)
 
                 args = stack[sp - spec.pops:sp]
                 sp -= spec.pops
@@ -61,17 +68,24 @@ class VM:
                 elif op == "PRINT": self.out(args[0])
                 elif op in BIN:
                     if op in ("DIV", "MOD") and args[1] == 0:
-                        raise VMError("E_DIV0", "division by zero", ins.row)
+                        raise RailError("E_DIV0", "division by zero", ins.row)
                     res = (wrap32(BIN[op](*args)),)
                 elif op == "JMP" or (op in CMP and CMP[op](*args)):
                     if arg <= pc:                       # back-edge: burn fuel
                         used += 1
                         if used > fuel:
-                            raise VMError("E_FUEL", f"fuel exhausted ({fuel} back-edges)", ins.row)
+                            # Outcome, not fault: keep the state for inspection.
+                            return {"halted": False, "reason": "E_FUEL",
+                                    "steps": steps, "fuel_used": used,
+                                    "stack": stack[:sp],
+                                    "symbols": {n: mem[i] for n, i in p.slots.items()}}
                     pc = arg
                     continue
                 elif op not in CMP:
-                    raise VMError("E_OPCODE", f"bad opcode {op!r}", ins.row)
+                    # Only reachable if OPS grew an op that no dispatch above
+                    # handled (and the import-time assert in opcodes didn't
+                    # catch it, because it checks membership not coverage).
+                    raise RailError("E_OPCODE", f"bad opcode {op!r}", ins.row)
 
                 for v in res:
                     stack[sp] = v
@@ -80,7 +94,7 @@ class VM:
         except RailError:
             raise
         except Exception as e:                           # never leak a Python traceback
-            raise VMError("E_INTERNAL", repr(e), ins.row if ins else None)
+            raise RailError("E_INTERNAL", repr(e), ins.row if ins else None)
 
         return {"halted": True, "steps": steps, "fuel_used": used,
                 "stack": stack[:sp],
