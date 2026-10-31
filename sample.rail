@@ -1,6 +1,6 @@
 // header
 declare x, int, 0;
-declare y, int, 16;
+declare y, int, 2;
 
 // rail
 █ :2        // initialize stack
@@ -11,6 +11,8 @@ declare y, int, 16;
 ├ < x, y
 ├ +
 ├ > x
+├ < x
+├ .
 ↳ :head
 ├ :tail
 │
